@@ -6,6 +6,9 @@ import os
 
 app = Flask(__name__)
 
+# =====================
+# LOAD DATA
+# =====================
 base_dir = os.path.dirname(__file__)
 file_path = os.path.join(base_dir, "dataset_penjualan_rongsok_update_v2.csv")
 
@@ -14,6 +17,9 @@ data = pd.read_csv(file_path, sep=";")
 # rapikan data
 data["barang"] = data["barang"].str.lower()
 
+# =====================
+# TRAIN MODEL
+# =====================
 model = {}
 
 for barang in data["barang"].unique():
@@ -31,6 +37,9 @@ for barang in data["barang"].unique():
     model[barang] = clf
 
 
+# =====================
+# FUNCTION PREDIKSI
+# =====================
 def prediksi_jual(barang, stok):
     barang = barang.lower()
 
@@ -48,6 +57,9 @@ def prediksi_jual(barang, stok):
     return pred
 
 
+# =====================
+# API ENDPOINT
+# =====================
 @app.route('/prediksi', methods=['POST'])
 def prediksi():
     req = request.json
@@ -63,6 +75,10 @@ def prediksi():
         "rekomendasi": hasil
     })
 
+
+# =====================
+# RUN SERVER
+# =====================
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
