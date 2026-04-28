@@ -1,65 +1,42 @@
 from flask import Flask, request, jsonify
 import pandas as pd
-from sklearn.tree import DecisionTreeClassifier
+from sklearn.cluster import KMeans
 import numpy as np
-import os
 
 app = Flask(__name__)
 
 # =====================
 # LOAD DATA
 # =====================
-base_dir = os.path.dirname(__file__)
-file_path = os.path.join(base_dir, "dataset_penjualan_rongsok_update_v2.csv")
+data = pd.read_csv("dataset_penjualan_rongsok_update_v2.csv", sep=";")
 
-data = pd.read_csv(file_path, sep=";")
-
-# rapikan data
-data["barang"] = data["barang"].str.lower()
-
-# =====================
-# TRAIN MODEL
-# =====================
 model = {}
 
 for barang in data["barang"].unique():
-    subset = data[data["barang"] == barang]
+    subset = data[data["barang"] == barang]["berat_keluar_kg"].values.reshape(-1,1)
 
-    # fitur (X) → stok & penjualan
-    X = subset[["stok", "berat_keluar_kg"]]
+    kmeans = KMeans(n_clusters=2, random_state=42)
+    kmeans.fit(subset)
 
-    # label (y) → buat sendiri
-    y = np.where(subset["berat_keluar_kg"] > subset["berat_keluar_kg"].mean(), "JUAL", "TUNGGU")
+    centers = kmeans.cluster_centers_.flatten()
+    cluster_jual = np.argmax(centers)
 
-    clf = DecisionTreeClassifier()
-    clf.fit(X, y)
+    model[barang] = {
+        "kmeans": kmeans,
+        "cluster_jual": cluster_jual
+    }
 
-    model[barang] = clf
-
-
-# =====================
-# FUNCTION PREDIKSI
-# =====================
 def prediksi_jual(barang, stok):
-    barang = barang.lower()
-
     if barang not in model:
         return "DATA TIDAK ADA"
 
-    subset = data[data["barang"] == barang]
+    kmeans = model[barang]["kmeans"]
+    cluster_jual = model[barang]["cluster_jual"]
 
-    rata_keluar = subset["berat_keluar_kg"].mean()
+    pred_cluster = kmeans.predict([[stok]])[0]
 
-    # prediksi pakai model
-    clf = model[barang]
-    pred = clf.predict([[stok, rata_keluar]])[0]
+    return "JUAL" if pred_cluster == cluster_jual else "TUNGGU"
 
-    return pred
-
-
-# =====================
-# API ENDPOINT
-# =====================
 @app.route('/prediksi', methods=['POST'])
 def prediksi():
     req = request.json
@@ -75,10 +52,6 @@ def prediksi():
         "rekomendasi": hasil
     })
 
-
-# =====================
-# RUN SERVER
-# =====================
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
