@@ -43,11 +43,11 @@ def ambil_data(barang):
         # ===== DATABASE =====
         cursor = conn.cursor()
         query = """
-        SELECT berat_kg 
-        FROM barang_keluar 
-        WHERE LOWER(nama_barang) = %s
-        ORDER BY tanggal DESC
-        LIMIT 50
+        SELECT bk.berat 
+        FROM barang_keluar bk
+        JOIN kategori_barang kb ON bk.id_kategoriBarang = kb.id
+        WHERE LOWER(kb.nama_kategori) = %s
+        ORDER BY bk.tanggal_keluar DESC
         """
         cursor.execute(query, (barang,))
         rows = cursor.fetchall()
