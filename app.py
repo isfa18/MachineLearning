@@ -1,9 +1,9 @@
 from flask import Flask, request, jsonify
 import pandas as pd
-from sklearn.cluster import KMeans
 import numpy as np
-import os
+from sklearn.cluster import KMeans
 import mysql.connector
+import os
 
 app = Flask(__name__)
 
@@ -11,24 +11,37 @@ app = Flask(__name__)
 # KONEKSI DATABASE
 # =====================
 conn = mysql.connector.connect(
-    host="195.88.211.226",
-    user="langgen1_lj_db",
-    password="~ao-S%9UGMrU,^bP",
-    database="langgen1_lj_db"
+        host="195.88.211.226",
+        user="langgen1_lj_db",
+        password="~ao-S%9UGMrU,^bP",
+        database="langgen1_lj_db"
 )
 
 # =====================
-# AMBIL DATA HYBRID (CSV + DB)
+# LOAD CSV SEKALI SAJA (BIAR CEPAT)
+# =====================
+try:
+    data_csv_global = pd.read_csv("dataset_penjualan_rongsok_update_v2.csv", sep=";")
+except:
+    data_csv_global = pd.DataFrame()
+
+# =====================
+# AMBIL DATA HYBRID (ADAPTIF)
 # =====================
 def ambil_data(barang):
     try:
         barang = barang.lower()
 
         # ===== CSV =====
-        data_csv = pd.read_csv("dataset_penjualan_rongsok_update_v2.csv", sep=";")
-        data_csv = data_csv[data_csv["barang"] == barang]["berat_keluar_kg"]
+        if not data_csv_global.empty:
+            data_csv = data_csv_global[
+                data_csv_global["barang"] == barang
+            ]["berat_keluar_kg"].tolist()
+        else:
+            data_csv = []
 
         # ===== DATABASE =====
+        cursor = conn.cursor()
         query = """
         SELECT berat_kg 
         FROM barang_keluar 
@@ -36,20 +49,34 @@ def ambil_data(barang):
         ORDER BY tanggal DESC
         LIMIT 50
         """
-        data_db = pd.read_sql(query, conn, params=[barang])
+        cursor.execute(query, (barang,))
+        rows = cursor.fetchall()
 
-        # ===== VALIDASI =====
-        data_db_series = data_db["berat_kg"] if not data_db.empty else pd.Series()
+        data_db = [row[0] for row in rows if row[0] is not None]
 
-        # ===== HYBRID (DB LEBIH DOMINAN) =====
-        data_db_weighted = pd.concat([data_db_series] * 3)  # DB diperkuat
-        semua_data = pd.concat([data_csv, data_db_weighted])
+        n_db = len(data_db)
 
-        return semua_data.dropna()
+        # ===== HYBRID ADAPTIF =====
+        if n_db == 0:
+            data = data_csv
+
+        elif n_db < 5:
+            data = data_csv + data_db
+
+        elif n_db < 20:
+            data = data_csv + (data_db * 2)
+
+        elif n_db < 50:
+            data = data_csv + (data_db * 3)
+
+        else:
+            data = data_db
+
+        return data
 
     except Exception as e:
         print("Error ambil data:", e)
-        return pd.Series()
+        return []
 
 # =====================
 # PREDIKSI
@@ -61,29 +88,29 @@ def prediksi_jual(barang, stok):
     if len(data) < 2:
         return "DATA TIDAK CUKUP"
 
-    subset = data.values.reshape(-1,1)
+    try:
+        subset = np.array(data).reshape(-1,1)
 
-    # KMeans
-    kmeans = KMeans(n_clusters=2, random_state=42)
-    kmeans.fit(subset)
+        kmeans = KMeans(n_clusters=2, random_state=42)
+        kmeans.fit(subset)
 
-    centers = sorted(kmeans.cluster_centers_.flatten())
+        centers = sorted(kmeans.cluster_centers_.flatten())
 
-    batas_bawah = centers[0]
-    batas_atas = centers[1]
+        # 🔥 threshold tengah (WAJIB)
+        batas_jual = (centers[0] + centers[1]) / 2
 
-    # 🔥 threshold lebih realistis
-    batas_jual = (batas_bawah + batas_atas) / 2
+        # debug (opsional)
+        print("Centers:", centers)
+        print("Batas jual:", batas_jual)
+        print("Stok:", stok)
 
-    # DEBUG (opsional, bisa dihapus nanti)
-    print("Centers:", centers)
-    print("Batas jual:", batas_jual)
-    print("Stok:", stok)
+        if stok >= batas_jual:
+            return "JUAL"
+        else:
+            return "TUNGGU"
 
-    if stok >= batas_jual:
-        return "JUAL"
-    else:
-        return "TUNGGU"
+    except Exception as e:
+        return f"ERROR KMEANS: {str(e)}"
 
 # =====================
 # API ENDPOINT
@@ -123,8 +150,7 @@ def prediksi():
         }), 500
 
 # =====================
-# RUN APP
+# RUN
 # =====================
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
