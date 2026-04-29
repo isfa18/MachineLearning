@@ -57,8 +57,6 @@ def prediksi_jual(barang, stok):
     # LOGIC BARU
     if stok >= batas_atas:
         return "JUAL"
-    elif stok >= batas_bawah:
-        return "PERTIMBANGKAN"
     else:
         return "TUNGGU"
 
