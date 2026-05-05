@@ -1,14 +1,19 @@
 from flask import Flask, request, jsonify
 import pandas as pd
 import numpy as np
-from sklearn.cluster import KMeans
 import mysql.connector
 import os
 
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+
+# =====================
+# FLASK APP
+# =====================
 app = Flask(__name__)
 
 # =====================
-# KONEKSI DATABASE
+# DATABASE CONNECTION
 # =====================
 conn = mysql.connector.connect(
     host="195.88.211.226",
@@ -18,152 +23,157 @@ conn = mysql.connector.connect(
 )
 
 # =====================
-# LOAD CSV SEKALI SAJA
+# LOAD CSV
 # =====================
 try:
-    data_csv_global = pd.read_csv("dataset_penjualan_rongsok_update_v2.csv", sep=";")
-    data_csv_global["barang"] = data_csv_global["barang"].str.lower()
+    data_csv = pd.read_csv("dataset_penjualan_rongsok_update_v2.csv", sep=";")
+    data_csv["barang"] = data_csv["barang"].str.lower()
 except:
-    data_csv_global = pd.DataFrame()
+    data_csv = pd.DataFrame()
 
 # =====================
-# AMBIL DATA HYBRID
+# AMBIL DATA DATABASE
+# =====================
+def ambil_data_db(barang):
+    cursor = conn.cursor()
+
+    query = """
+    SELECT bk.berat 
+    FROM barang_keluar bk
+    JOIN kategori_barang kb ON bk.id_kategoriBarang = kb.id
+    WHERE LOWER(kb.nama_kategori) LIKE %s
+    """
+
+    cursor.execute(query, ('%' + barang.lower() + '%',))
+    rows = cursor.fetchall()
+
+    data = []
+    for r in rows:
+        try:
+            data.append(float(str(r[0]).replace("Kg", "").strip()))
+        except:
+            pass
+
+    return data
+
+# =====================
+# GABUNG CSV + DB
 # =====================
 def ambil_data(barang):
-    try:
-        barang = barang.lower()
 
-        # ===== CSV =====
-        if not data_csv_global.empty:
-            data_csv = data_csv_global[
-                data_csv_global["barang"] == barang
-            ]["berat_keluar_kg"].tolist()
-        else:
-            data_csv = []
+    # CSV
+    if not data_csv.empty:
+        data_csv_filtered = data_csv[
+            data_csv["barang"] == barang.lower()
+        ]["berat_keluar_kg"].tolist()
+    else:
+        data_csv_filtered = []
 
-        # ===== DATABASE =====
-        cursor = conn.cursor()
-        query = """
-        SELECT bk.berat 
-        FROM barang_keluar bk
-        JOIN kategori_barang kb ON bk.id_kategoriBarang = kb.id
-        WHERE LOWER(kb.nama_kategori) LIKE %s
-        ORDER BY bk.tanggal_keluar DESC
-        """
-        cursor.execute(query, ('%' + barang + '%',))
-        rows = cursor.fetchall()
+    # DB
+    data_db = ambil_data_db(barang)
 
-        # ===== BERSIHKAN DATA DB (string → float) =====
-        data_db = []
-        for row in rows:
-            try:
-                nilai = float(str(row[0]).replace("Kg", "").replace("kg", "").strip())
-                data_db.append(nilai)
-            except:
-                pass
+    # GABUNG
+    data = data_csv_filtered + data_db
 
-        n_db = len(data_db)
-
-        # ===== HYBRID ADAPTIF =====
-        if n_db == 0:
-            data = data_csv
-
-        elif n_db < 5:
-            data = data_csv + data_db
-
-        elif n_db < 20:
-            data = data_csv + (data_db * 2)
-
-        elif n_db < 50:
-            data = data_csv + (data_db * 3)
-
-        else:
-            data = data_db
-
-        return data, data_csv, data_db
-
-    except Exception as e:
-        print("Error ambil data:", e)
-        return [], [], []
+    return data
 
 # =====================
-# PREDIKSI
+# BUILD DATASET TRAINING
+# =====================
+def build_training_data(barang_list):
+
+    X = []
+    y = []
+
+    for barang in barang_list:
+
+        data = ambil_data(barang)
+
+        if len(data) < 5:
+            continue
+
+        avg = np.mean(data)
+        mx = np.max(data)
+        mn = np.min(data)
+        std = np.std(data)
+
+        # simulasi stok training (proxy label)
+        stok = avg * np.random.uniform(0.8, 1.2)
+
+        label = 1 if stok >= avg else 0
+
+        X.append([avg, mx, mn, std, stok])
+        y.append(label)
+
+    return np.array(X), np.array(y)
+
+# =====================
+# TRAIN MODEL ML
+# =====================
+barang_list = ["besi", "dus"]
+
+X, y = build_training_data(barang_list)
+
+model = LogisticRegression()
+
+if len(X) > 0:
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+    model.fit(X_train, y_train)
+
+# =====================
+# PREDIKSI FUNCTION
 # =====================
 def prediksi_jual(barang, stok):
 
-    data, data_csv, data_db = ambil_data(barang)
+    data = ambil_data(barang)
 
-    # ===== FALLBACK CERDAS =====
     if len(data) < 2:
-        if len(data_csv) >= 2:
-            data = data_csv
-        elif len(data_db) >= 2:
-            data = data_db
-        else:
-            return "TUNGGU"   # jangan gagal total
+        return "TUNGGU"
 
-    try:
-        subset = np.array(data).reshape(-1, 1)
+    features = np.array([[
+        np.mean(data),
+        np.max(data),
+        np.min(data),
+        np.std(data),
+        stok
+    ]])
 
-        kmeans = KMeans(n_clusters=2, random_state=42)
-        kmeans.fit(subset)
+    pred = model.predict(features)[0]
 
-        centers = sorted(kmeans.cluster_centers_.flatten())
-
-        # ===== THRESHOLD =====
-        batas_jual = (centers[0] + centers[1]) / 2
-
-        print("Centers:", centers)
-        print("Batas:", batas_jual)
-        print("Stok:", stok)
-
-        if stok >= batas_jual:
-            return "JUAL"
-        else:
-            return "TUNGGU"
-
-    except Exception as e:
-        return f"ERROR KMEANS: {str(e)}"
+    return "JUAL" if pred == 1 else "TUNGGU"
 
 # =====================
-# API
+# API ENDPOINT
 # =====================
 @app.route('/prediksi', methods=['POST'])
 def prediksi():
+
+    req = request.json
+
+    if not req:
+        return jsonify({"error": "Request kosong"}), 400
+
+    barang = req.get("barang")
+    stok = req.get("stok")
+
+    if barang is None or stok is None:
+        return jsonify({"error": "Input tidak lengkap"}), 400
+
     try:
-        req = request.json
+        stok = float(stok)
+    except:
+        return jsonify({"error": "Stok harus angka"}), 400
 
-        if not req:
-            return jsonify({"error": "Request kosong"}), 400
+    hasil = prediksi_jual(barang, stok)
 
-        barang = req.get('barang')
-        stok = req.get('stok')
-
-        if not barang or stok is None:
-            return jsonify({"error": "Input tidak lengkap"}), 400
-
-        barang = str(barang).lower()
-
-        try:
-            stok = float(stok)
-        except:
-            return jsonify({"error": "Stok harus angka"}), 400
-
-        hasil = prediksi_jual(barang, stok)
-
-        return jsonify({
-            "barang": barang,
-            "stok": stok,
-            "rekomendasi": hasil
-        })
-
-    except Exception as e:
-        return jsonify({
-            "error": str(e)
-        }), 500
+    return jsonify({
+        "barang": barang,
+        "stok": stok,
+        "rekomendasi": hasil
+    })
 
 # =====================
-# RUN
+# RUN APP
 # =====================
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
+    app.run(host='0.0.0.0', port=5000)
