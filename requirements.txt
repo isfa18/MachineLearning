@@ -1,6 +1,6 @@
 flask
-pandas
-numpy
-scikit-learn
+flask-cors
 gunicorn
 mysql-connector-python
+numpy
+scikit-learn
