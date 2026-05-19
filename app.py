@@ -1,10 +1,10 @@
 from flask import Flask, request, jsonify
-import pandas as pd
 import numpy as np
 import mysql.connector
 
-from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
 
 # =====================
 # FLASK
@@ -17,9 +17,24 @@ app = Flask(__name__)
 conn = mysql.connector.connect(
     host="195.88.211.226",
     user="langgen1_lj_db",
-    password="ISI_PASSWORD_KAMU",
+    password="~ao-S%9UGMrU,^bP",
     database="langgen1_lj_db"
 )
+
+# =====================
+# BERSIHKAN BERAT
+# =====================
+def bersihkan_berat(nilai):
+    try:
+        nilai = str(nilai)
+        nilai = nilai.replace("Kg", "")
+        nilai = nilai.replace("KG", "")
+        nilai = nilai.replace("kg", "")
+        nilai = nilai.replace(",", ".")
+        nilai = nilai.strip()
+        return float(nilai)
+    except:
+        return None
 
 # =====================
 # AMBIL DATA DB
@@ -38,16 +53,11 @@ def ambil_data_db(barang):
     rows = cursor.fetchall()
 
     data = []
+
     for r in rows:
-        try:
-            berat = str(r[0])
-            berat = berat.replace("Kg", "")
-            berat = berat.replace("kg", "")
-            berat = berat.replace("KG", "")
-            berat = berat.strip()
-            data.append(float(berat))
-        except:
-            pass
+        berat = bersihkan_berat(r[0])
+        if berat is not None:
+            data.append(berat)
 
     cursor.close()
     return data
@@ -59,7 +69,7 @@ def ambil_data(barang):
     return ambil_data_db(barang)
 
 # =====================
-# BUILD DATASET
+# BUILD DATASET MACHINE LEARNING
 # =====================
 def build_training_data(barang_list):
 
@@ -70,7 +80,13 @@ def build_training_data(barang_list):
 
         data = ambil_data(barang)
 
+        print("====================")
+        print("Barang:", barang)
+        print("Data:", data)
+        print("Jumlah data:", len(data))
+
         if len(data) < 2:
+            print("Data kurang dari 2, dilewati")
             continue
 
         avg = np.mean(data)
@@ -78,7 +94,8 @@ def build_training_data(barang_list):
         mn = np.min(data)
         std = np.std(data)
 
-        # Membuat data stok simulasi dari kecil sampai besar
+        # Membuat variasi stok simulasi untuk training
+        # Tidak random, supaya hasil stabil
         stok_simulasi_list = np.linspace(
             avg * 0.1,
             avg * 5.0,
@@ -92,19 +109,27 @@ def build_training_data(barang_list):
             # 0 = TUNGGU
             label = 1 if stok_simulasi >= avg else 0
 
-            X.append([avg, mx, mn, std, stok_simulasi])
+            X.append([
+                avg,
+                mx,
+                mn,
+                std,
+                stok_simulasi
+            ])
+
             y.append(label)
 
     return np.array(X), np.array(y)
 
 # =====================
-# TRAIN MODEL SAFE
+# TRAIN MODEL
 # =====================
 barang_list = ["besi", "dus", "atum"]
 
 X, y = build_training_data(barang_list)
 
 model = None
+akurasi_model = None
 
 if len(X) > 0 and len(np.unique(y)) > 1:
     X_train, X_test, y_train, y_test = train_test_split(
@@ -115,27 +140,43 @@ if len(X) > 0 and len(np.unique(y)) > 1:
         stratify=y
     )
 
-    model = LogisticRegression(max_iter=1000)
+    model = DecisionTreeClassifier(
+        criterion="gini",
+        max_depth=3,
+        random_state=42
+    )
+
     model.fit(X_train, y_train)
 
+    y_pred = model.predict(X_test)
+    akurasi_model = accuracy_score(y_test, y_pred)
+
+    print("====================")
     print("Model berhasil dilatih")
+    print("Algoritma: Decision Tree Classifier")
     print("Jumlah data training:", len(X))
     print("Class:", np.unique(y, return_counts=True))
+    print("Akurasi:", akurasi_model)
+    print("====================")
+
 else:
-    print("Model tidak dilatih (data tidak cukup / 1 class)")
+    print("====================")
+    print("Model tidak dilatih")
+    print("Penyebab: data tidak cukup atau label hanya 1 class")
+    print("====================")
 
 # =====================
-# PREDIKSI SAFE
+# PREDIKSI
 # =====================
 def prediksi_jual(barang, stok):
 
     data = ambil_data(barang)
 
-    if model is None:
-        return "TUNGGU"
-
     if len(data) < 2:
-        return "TUNGGU"
+        return {
+            "rekomendasi": "TUNGGU",
+            "keterangan": "Data pengeluaran barang kurang dari 2"
+        }
 
     avg = np.mean(data)
     mx = np.max(data)
@@ -150,17 +191,33 @@ def prediksi_jual(barang, stok):
         stok
     ]])
 
-    # Model tetap dipakai
-    pred = model.predict(features)[0]
-
-    # Logic akhir disesuaikan dengan rata-rata pengeluaran
-    if stok >= avg:
-        return "JUAL"
+    if model is not None:
+        pred = model.predict(features)[0]
     else:
-        return "TUNGGU"
+        pred = 0
+
+    # Validasi akhir sesuai logika bisnis
+    # Kalau stok >= rata-rata pengeluaran, maka JUAL
+    if stok >= avg:
+        hasil = "JUAL"
+    else:
+        hasil = "TUNGGU"
+
+    return {
+        "rekomendasi": hasil,
+        "prediksi_model": "JUAL" if pred == 1 else "TUNGGU",
+        "stok": float(stok),
+        "rata_rata_pengeluaran": round(float(avg), 2),
+        "pengeluaran_maksimum": round(float(mx), 2),
+        "pengeluaran_minimum": round(float(mn), 2),
+        "standar_deviasi": round(float(std), 2),
+        "akurasi_model": round(float(akurasi_model), 4) if akurasi_model is not None else None,
+        "algoritma": "Decision Tree Classifier",
+        "keterangan": "JUAL jika stok lebih besar atau sama dengan rata-rata pengeluaran"
+    }
 
 # =====================
-# API
+# API PREDIKSI
 # =====================
 @app.route('/prediksi', methods=['POST'])
 def prediksi():
@@ -176,7 +233,8 @@ def prediksi():
         return jsonify({
             "barang": barang,
             "stok": stok,
-            "rekomendasi": hasil
+            "rekomendasi": hasil["rekomendasi"],
+            "detail": hasil
         })
 
     except Exception as e:
@@ -184,6 +242,62 @@ def prediksi():
             "error": str(e),
             "rekomendasi": "TUNGGU"
         })
+
+# =====================
+# API CEK DATA
+# =====================
+@app.route('/cek-data', methods=['GET'])
+def cek_data():
+
+    try:
+        barang = request.args.get("barang")
+
+        if not barang:
+            return jsonify({
+                "error": "Parameter barang wajib diisi. Contoh: /cek-data?barang=besi"
+            })
+
+        data = ambil_data(barang)
+
+        if len(data) == 0:
+            return jsonify({
+                "barang": barang,
+                "jumlah_data": 0,
+                "data": [],
+                "keterangan": "Data tidak ditemukan"
+            })
+
+        avg = np.mean(data)
+
+        return jsonify({
+            "barang": barang,
+            "jumlah_data": len(data),
+            "data": data,
+            "rata_rata_pengeluaran": round(float(avg), 2),
+            "pengeluaran_maksimum": round(float(np.max(data)), 2),
+            "pengeluaran_minimum": round(float(np.min(data)), 2),
+            "standar_deviasi": round(float(np.std(data)), 2),
+            "rekomendasi_jika_stok_sama_atau_diatas": round(float(avg), 2)
+        })
+
+    except Exception as e:
+        return jsonify({
+            "error": str(e)
+        })
+
+# =====================
+# API HOME
+# =====================
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({
+        "message": "API Prediksi Penjualan Barang Berjalan",
+        "algoritma": "Decision Tree Classifier",
+        "status_model": "aktif" if model is not None else "tidak aktif",
+        "akurasi_model": round(float(akurasi_model), 4) if akurasi_model is not None else None,
+        "endpoint_prediksi": "/prediksi",
+        "endpoint_cek_data": "/cek-data?barang=besi"
+    })
 
 # =====================
 # RUN
