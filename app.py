@@ -3,7 +3,7 @@ import os
 import numpy as np
 import mysql.connector
 
-from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 
@@ -18,11 +18,20 @@ app = Flask(__name__)
 # DB CONFIG
 # =====================
 DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "195.88.211.226"),
-    "user": os.getenv("DB_USER", "ISI_USER_DATABASE"),
-    "password": os.getenv("DB_PASSWORD", "ISI_PASSWORD_DATABASE"),
-    "database": os.getenv("DB_NAME", "ISI_NAMA_DATABASE")
+    "host": os.getenv("DB_HOST", "localhost"),
+    "port": int(os.getenv("DB_PORT", 3306)),
+    "user": os.getenv("DB_USERNAME", "langgen1_lj_db"),
+    "password": os.getenv("DB_PASSWORD", "~ao-S%9UGMrU,^bP"),
+    "database": os.getenv("DB_DATABASE", "langgen1_lj_db")
 }
+
+
+# =====================
+# BATAS REKOMENDASI
+# =====================
+# 1.0 artinya stok boleh dijual jika stok >= rata-rata pengeluaran
+# Kalau mau lebih ketat, bisa ganti jadi 1.2
+BATAS_MULTIPLIER = 1.0
 
 
 # =====================
@@ -49,7 +58,46 @@ def bersihkan_berat(nilai):
 
 
 # =====================
-# AMBIL DATA DB
+# AMBIL SEMUA NAMA BARANG
+# =====================
+def ambil_semua_barang():
+    conn = None
+    cursor = None
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        query = """
+        SELECT DISTINCT LOWER(kb.nama_kategori)
+        FROM kategori_barang kb
+        JOIN barang_keluar bk ON bk.id_kategoriBarang = kb.id
+        """
+
+        cursor.execute(query)
+        rows = cursor.fetchall()
+
+        barang_list = []
+
+        for row in rows:
+            if row[0] is not None:
+                barang_list.append(str(row[0]).lower())
+
+        return barang_list
+
+    except Exception as e:
+        print("ERROR ambil_semua_barang:", e)
+        return []
+
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+# =====================
+# AMBIL DATA PENGELUARAN BARANG
 # =====================
 def ambil_data_db(barang):
     conn = None
@@ -90,29 +138,27 @@ def ambil_data_db(barang):
 
 
 # =====================
-# AMBIL DATA
+# BUILD DATASET MACHINE LEARNING
 # =====================
-def ambil_data(barang):
-    return ambil_data_db(barang)
-
-
-# =====================
-# BUILD DATASET ML
-# =====================
-def build_training_data(barang_list):
+def build_training_data():
     X = []
     y = []
 
-    for barang in barang_list:
-        data = ambil_data(barang)
+    barang_list = ambil_semua_barang()
 
-        print("====================")
+    print("====================")
+    print("BARANG LIST:", barang_list)
+    print("====================")
+
+    for barang in barang_list:
+        data = ambil_data_db(barang)
+
         print("Barang:", barang)
         print("Data:", data)
         print("Jumlah data:", len(data))
 
-        if len(data) < 5:
-            print("Data kurang dari 5, dilewati")
+        if len(data) < 2:
+            print("Data kurang dari 2, dilewati:", barang)
             continue
 
         rata_rata = np.mean(data)
@@ -120,15 +166,17 @@ def build_training_data(barang_list):
         minimum = np.min(data)
         standar_deviasi = np.std(data)
 
-        # Membuat data stok simulasi untuk training ML
+        batas_jual = rata_rata * BATAS_MULTIPLIER
+
+        # Membuat variasi stok simulasi untuk training ML
+        # Stok dibuat dari sangat rendah sampai tinggi
         stok_simulasi_list = np.linspace(
-            rata_rata * 0.3,
-            rata_rata * 4.0,
-            150
+            rata_rata * 0.1,
+            rata_rata * 5.0,
+            200
         )
 
         for stok_simulasi in stok_simulasi_list:
-            batas_jual = rata_rata * 1.2
 
             # Label supervised learning
             # 1 = JUAL
@@ -151,12 +199,25 @@ def build_training_data(barang_list):
 # =====================
 # TRAIN MODEL
 # =====================
-barang_list = ["besi", "dus"]
-
-X, y = build_training_data(barang_list)
-
 model = None
 akurasi_model = None
+
+status_training = {
+    "status": "belum dilatih",
+    "pesan": "",
+    "jumlah_data_training": 0,
+    "class": None
+}
+
+X, y = build_training_data()
+
+status_training["jumlah_data_training"] = int(len(X))
+
+if len(y) > 0:
+    unique_class, jumlah_class = np.unique(y, return_counts=True)
+    status_training["class"] = {
+        str(int(k)): int(v) for k, v in zip(unique_class, jumlah_class)
+    }
 
 if len(X) > 0 and len(np.unique(y)) > 1:
     X_train, X_test, y_train, y_test = train_test_split(
@@ -167,11 +228,19 @@ if len(X) > 0 and len(np.unique(y)) > 1:
         stratify=y
     )
 
-    model = LogisticRegression(max_iter=1000)
+    model = DecisionTreeClassifier(
+        criterion="gini",
+        max_depth=3,
+        random_state=42
+    )
+
     model.fit(X_train, y_train)
 
     y_pred = model.predict(X_test)
     akurasi_model = accuracy_score(y_test, y_pred)
+
+    status_training["status"] = "aktif"
+    status_training["pesan"] = "Model berhasil dilatih"
 
     print("====================")
     print("MODEL BERHASIL DILATIH")
@@ -181,9 +250,18 @@ if len(X) > 0 and len(np.unique(y)) > 1:
     print("====================")
 
 else:
+    status_training["status"] = "tidak aktif"
+
+    if len(X) == 0:
+        status_training["pesan"] = "Data training kosong. Cek koneksi database atau data barang_keluar."
+    elif len(np.unique(y)) <= 1:
+        status_training["pesan"] = "Model gagal dilatih karena label hanya memiliki 1 class."
+    else:
+        status_training["pesan"] = "Model gagal dilatih."
+
     print("====================")
     print("MODEL TIDAK DILATIH")
-    print("Cek data barang_keluar dan kategori_barang")
+    print(status_training["pesan"])
     print("====================")
 
 
@@ -191,25 +269,20 @@ else:
 # PREDIKSI JUAL
 # =====================
 def prediksi_jual(barang, stok):
-    data = ambil_data(barang)
-
-    if model is None:
-        return {
-            "rekomendasi": "TUNGGU",
-            "keterangan": "Model belum berhasil dilatih"
-        }
+    data = ambil_data_db(barang)
 
     if len(data) < 2:
         return {
             "rekomendasi": "TUNGGU",
-            "keterangan": "Data pengeluaran barang kurang"
+            "keterangan": "Data pengeluaran barang kurang",
+            "jumlah_data": len(data)
         }
 
     rata_rata = np.mean(data)
     maksimum = np.max(data)
     minimum = np.min(data)
     standar_deviasi = np.std(data)
-    batas_jual = rata_rata * 1.2
+    batas_jual = rata_rata * BATAS_MULTIPLIER
 
     features = np.array([[
         rata_rata,
@@ -219,20 +292,30 @@ def prediksi_jual(barang, stok):
         stok
     ]])
 
-    prediksi = model.predict(features)[0]
+    prediksi_model = None
 
-    hasil = "JUAL" if prediksi == 1 else "TUNGGU"
+    if model is not None:
+        prediksi_model = model.predict(features)[0]
+
+    # Hasil akhir tetap divalidasi dengan threshold agar tidak ngawur
+    if stok >= batas_jual:
+        hasil = "JUAL"
+    else:
+        hasil = "TUNGGU"
 
     return {
         "rekomendasi": hasil,
+        "prediksi_model": "JUAL" if prediksi_model == 1 else "TUNGGU" if prediksi_model == 0 else "MODEL TIDAK AKTIF",
         "stok": round(float(stok), 2),
+        "jumlah_data": len(data),
         "rata_rata_pengeluaran": round(float(rata_rata), 2),
         "pengeluaran_maksimum": round(float(maksimum), 2),
         "pengeluaran_minimum": round(float(minimum), 2),
         "standar_deviasi": round(float(standar_deviasi), 2),
         "batas_jual": round(float(batas_jual), 2),
+        "batas_multiplier": BATAS_MULTIPLIER,
         "akurasi_model": round(float(akurasi_model), 4) if akurasi_model is not None else None,
-        "keterangan": "Rekomendasi dihasilkan menggunakan Logistic Regression"
+        "keterangan": "Rekomendasi menggunakan Machine Learning Decision Tree dengan validasi threshold rata-rata pengeluaran"
     }
 
 
@@ -245,8 +328,23 @@ def home():
         "message": "API Prediksi Penjualan Barang Berjalan",
         "status_model": "aktif" if model is not None else "tidak aktif",
         "akurasi_model": round(float(akurasi_model), 4) if akurasi_model is not None else None,
+        "training": status_training,
         "endpoint_prediksi": "/prediksi",
-        "endpoint_cek_data": "/cek-data?barang=besi"
+        "endpoint_cek_data": "/cek-data?barang=besi",
+        "endpoint_barang": "/barang"
+    })
+
+
+# =====================
+# API LIST BARANG
+# =====================
+@app.route("/barang", methods=["GET"])
+def list_barang():
+    barang_list = ambil_semua_barang()
+
+    return jsonify({
+        "jumlah_barang": len(barang_list),
+        "barang": barang_list
     })
 
 
@@ -263,7 +361,7 @@ def cek_data():
                 "error": "Parameter barang wajib diisi. Contoh: /cek-data?barang=besi"
             }), 400
 
-        data = ambil_data(barang)
+        data = ambil_data_db(barang)
 
         if len(data) == 0:
             return jsonify({
@@ -274,6 +372,7 @@ def cek_data():
             })
 
         rata_rata = np.mean(data)
+        batas_jual = rata_rata * BATAS_MULTIPLIER
 
         return jsonify({
             "barang": barang,
@@ -283,7 +382,8 @@ def cek_data():
             "pengeluaran_maksimum": round(float(np.max(data)), 2),
             "pengeluaran_minimum": round(float(np.min(data)), 2),
             "standar_deviasi": round(float(np.std(data)), 2),
-            "batas_jual": round(float(rata_rata * 1.2), 2)
+            "batas_jual": round(float(batas_jual), 2),
+            "batas_multiplier": BATAS_MULTIPLIER
         })
 
     except Exception as e:
@@ -303,7 +403,10 @@ def prediksi():
         if req is None:
             return jsonify({
                 "error": "Body JSON tidak boleh kosong",
-                "rekomendasi": "TUNGGU"
+                "contoh": {
+                    "barang": "besi",
+                    "stok": 1216
+                }
             }), 400
 
         barang = req.get("barang")
@@ -314,9 +417,8 @@ def prediksi():
                 "error": "Field barang dan stok wajib diisi",
                 "contoh": {
                     "barang": "besi",
-                    "stok": 9100
-                },
-                "rekomendasi": "TUNGGU"
+                    "stok": 1216
+                }
             }), 400
 
         stok = float(stok)
@@ -338,10 +440,82 @@ def prediksi():
 
 
 # =====================
+# API PREDIKSI BANYAK BARANG
+# =====================
+@app.route("/prediksi-semua", methods=["POST"])
+def prediksi_semua():
+    try:
+        req = request.get_json()
+
+        if req is None:
+            return jsonify({
+                "error": "Body JSON tidak boleh kosong",
+                "contoh": {
+                    "items": [
+                        {
+                            "barang": "dus",
+                            "stok": 2760
+                        },
+                        {
+                            "barang": "besi",
+                            "stok": 1216
+                        },
+                        {
+                            "barang": "atum",
+                            "stok": 40
+                        }
+                    ]
+                }
+            }), 400
+
+        items = req.get("items")
+
+        if not items or not isinstance(items, list):
+            return jsonify({
+                "error": "Field items wajib diisi dalam bentuk list"
+            }), 400
+
+        hasil_semua = []
+
+        for item in items:
+            barang = item.get("barang")
+            stok = item.get("stok")
+
+            if not barang or stok is None:
+                hasil_semua.append({
+                    "barang": barang,
+                    "stok": stok,
+                    "rekomendasi": "TUNGGU",
+                    "error": "barang atau stok kosong"
+                })
+                continue
+
+            stok = float(stok)
+            hasil = prediksi_jual(barang, stok)
+
+            hasil_semua.append({
+                "barang": barang,
+                "stok": stok,
+                "rekomendasi": hasil["rekomendasi"],
+                "detail": hasil
+            })
+
+        return jsonify({
+            "hasil": hasil_semua
+        })
+
+    except Exception as e:
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+
+# =====================
 # RUN UNTUK DEPLOY
 # =====================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
+
     app.run(
         host="0.0.0.0",
         port=port,
