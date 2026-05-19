@@ -21,7 +21,7 @@ CORS(app)
 DB_CONFIG = {
     "host": "195.88.211.226",
     "user": "langgen1_lj_db",
-    "password": "ISI_PASSWORD_DATABASE_KAMU",
+    "password": "~ao-S%9UGMrU,^bP",
     "database": "langgen1_lj_db",
     "port": 3306
 }
